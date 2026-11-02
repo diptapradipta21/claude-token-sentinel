@@ -18,7 +18,7 @@
   ▸ Live Tokenometer & Rate Limit Sentinel for Claude Code
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ SESSION METRICS & CONTEXT HEALTH                                            │
+│ SESSION METRICS & CONTEXT HEALTH [Live Transcript]
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  • Total Prompt Tokens     :       68,420 tokens                            │
 │  • Total Completion Tokens :        8,150 tokens                            │
@@ -45,7 +45,10 @@ Long multi-turn coding sessions quietly accumulate tens of thousands of tokens f
    - 🟡 **Warning (80k–140k tokens):** Context accumulating, consider selective file reads.
    - 🔴 **Red Alert (>140k tokens):** Imminent rate-limit risk — recommends running `/compact` or pruning.
 3. **Real-Time Cost Counter:** Computes exact session expenditure in USD based on official Anthropic Sonnet 3.5/5.5 API pricing.
-4. **Zero External Dependencies:** Built purely on the Python standard library.
+4. **Auto-Discovery:** Scans standard Claude Code project and history paths automatically.
+5. **CI / Shell Integration:** `--once` flag exits with status code `2` on critical bloat, `1` on warning, `0` on optimal.
+6. **JSON Pipe Support:** `--json` outputs machine-parseable usage stats for monitoring dashboards and status bars.
+7. **Zero External Dependencies:** Built purely on the Python standard library.
 
 ---
 
@@ -64,21 +67,38 @@ Run in a split terminal pane alongside your Claude Code session:
 python3 sentinel.py
 ```
 
-### 3. Quick Token Diagnostic Check
+### 3. Single-Shot Snapshot & CI Checks
+Inspect current session without infinite watch loop:
+```bash
+# Human readable HUD snapshot
+python3 sentinel.py --once
+
+# Machine-readable JSON output
+python3 sentinel.py --once --json
+```
+
+### 4. Quick Token Diagnostic Check
 Instantly evaluate any token count against safety thresholds:
 ```bash
 python3 sentinel.py --tokens 145000
+```
+
+### 5. Interactive Demo Mode
+Preview the live HUD visualizer without needing an active Claude Code transcript:
+```bash
+python3 sentinel.py --demo
 ```
 
 ---
 
 ## ⚙️ Configuration & Customization
 
-You can adjust the refresh rate or monitor specific transcript files:
-
 ```bash
-# Refresh every 2 seconds monitoring a custom session file
+# Monitor a specific transcript file with 2-second refresh
 python3 sentinel.py --watch /path/to/claude/session.jsonl --interval 2.0
+
+# Customize alert thresholds (e.g., 60k warning, 100k danger)
+python3 sentinel.py --warn-threshold 60000 --danger-threshold 100000
 ```
 
 ---

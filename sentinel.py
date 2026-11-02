@@ -2,7 +2,7 @@
 """
 claude-token-sentinel — Live Real-Time Terminal Tokenometer & Cost Guard for Claude Code.
 Monitors Claude Code session transcripts, warns before 5-hour rate limit exhaustion,
-tracks token expenditure, and alerts when context window reaches danger thresholds (>100k tokens).
+tracks token expenditure, and alerts when context window reaches danger thresholds (>140k tokens).
 """
 
 import os
@@ -27,8 +27,8 @@ PROMPT_COST_PER_M = 3.00   # $3 / 1M prompt tokens
 COMPLETION_COST_PER_M = 15.00 # $15 / 1M output tokens
 
 # Safe thresholds for Claude Code 200k window
-WARN_THRESHOLD_TOKENS = 80000   # 80k tokens -> Yellow alert
-DANGER_THRESHOLD_TOKENS = 140000 # 140k tokens -> Red alert (Need /compact)
+DEFAULT_WARN_THRESHOLD = 80000    # 80k tokens -> Yellow alert
+DEFAULT_DANGER_THRESHOLD = 140000 # 140k tokens -> Red alert (Need /compact)
 
 def get_claude_history_paths():
     """Locate Claude Code session logs across common OS locations."""
@@ -36,11 +36,27 @@ def get_claude_history_paths():
     candidates = [
         home / ".claude" / "history",
         home / ".claude" / "sessions",
+        home / ".claude" / "projects",
         home / ".config" / "claude-code" / "history",
         Path("/opt/data/home/.claude/history"),
+        Path("/opt/data/home/.claude/sessions"),
         Path.cwd() / ".claude"
     ]
     return [p for p in candidates if p.exists()]
+
+def find_latest_transcript():
+    """Discover the most recently modified Claude Code transcript file."""
+    search_dirs = get_claude_history_paths()
+    found_files = []
+    for base in search_dirs:
+        if base.is_file():
+            found_files.append(base)
+        elif base.is_dir():
+            found_files.extend(base.rglob("*.jsonl"))
+            found_files.extend(base.rglob("*.json"))
+    if not found_files:
+        return None
+    return max(found_files, key=lambda f: f.stat().st_mtime)
 
 def parse_transcript_tokens(file_path):
     """Parse JSONL or JSON transcript lines to calculate cumulative token usage."""
@@ -56,7 +72,6 @@ def parse_transcript_tokens(file_path):
                     continue
                 try:
                     data = json.loads(line)
-                    # Check standard usage shapes
                     usage = data.get("usage") or data.get("message", {}).get("usage")
                     if usage:
                         input_tokens += usage.get("input_tokens", 0)
@@ -80,35 +95,31 @@ def print_hud_banner():
 """
     print(banner)
 
-def render_meter(current_tokens, max_tokens=200000, bar_length=32):
-    ratio = min(1.0, current_tokens / max_tokens)
+def get_status_info(total_tokens, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+    if total_tokens >= danger_threshold:
+        return "critical", RED, f"{RED}{BOLD}CRITICAL (>={danger_threshold:,}) — RUN /compact NOW{RESET}"
+    elif total_tokens >= warn_threshold:
+        return "warning", YELLOW, f"{YELLOW}{BOLD}WARNING (>={warn_threshold:,}) — HIGH CONTEXT{RESET}"
+    return "optimal", GREEN, f"{GREEN}{BOLD}OPTIMAL (LOW WASTE){RESET}"
+
+def render_meter(current_tokens, max_tokens=200000, bar_length=32, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+    ratio = min(1.0, current_tokens / max_tokens) if max_tokens > 0 else 0.0
     filled = int(bar_length * ratio)
     bar = "█" * filled + "░" * (bar_length - filled)
     
-    if current_tokens >= DANGER_THRESHOLD_TOKENS:
-        color = RED
-        status_label = f"{RED}{BOLD}CRITICAL (>140k) — RUN /compact NOW{RESET}"
-    elif current_tokens >= WARN_THRESHOLD_TOKENS:
-        color = YELLOW
-        status_label = f"{YELLOW}{BOLD}WARNING (>80k) — HIGH CONTEXT{RESET}"
-    else:
-        color = GREEN
-        status_label = f"{GREEN}{BOLD}OPTIMAL (LOW WASTE){RESET}"
-        
+    _, color, status_label = get_status_info(current_tokens, warn_threshold, danger_threshold)
     return f"[{color}{bar}{RESET}] {ratio*100:5.1f}%  |  Status: {status_label}"
 
-def format_hud_box(input_tokens, output_tokens, turns):
+def format_hud_box(input_tokens, output_tokens, turns, source_label="Live", warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
     total_tokens = input_tokens + output_tokens
     est_cost = (input_tokens / 1_000_000 * PROMPT_COST_PER_M) + (output_tokens / 1_000_000 * COMPLETION_COST_PER_M)
+    status_key, _, _ = get_status_info(total_tokens, warn_threshold, danger_threshold)
     
-    print("\033[2J\033[H", end="") # Clear terminal screen
-    print_hud_banner()
-    
-    meter_line = render_meter(total_tokens)
+    meter_line = render_meter(total_tokens, warn_threshold=warn_threshold, danger_threshold=danger_threshold)
     
     box = f"""
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ {BOLD}SESSION METRICS & CONTEXT HEALTH{RESET}                                           │
+│ {BOLD}SESSION METRICS & CONTEXT HEALTH{RESET} [{DIM}{source_label}{RESET}]
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  • Total Prompt Tokens     : {CYAN}{input_tokens:>12,}{RESET} tokens                            │
 │  • Total Completion Tokens : {CYAN}{output_tokens:>12,}{RESET} tokens                            │
@@ -122,32 +133,66 @@ def format_hud_box(input_tokens, output_tokens, turns):
 """
     print(box)
     
-    if total_tokens >= DANGER_THRESHOLD_TOKENS:
+    if status_key == "critical":
         print(f" {RED}{BOLD}🚨 RED ALERT:{RESET} Your context window is heavily bloated.")
         print(f"    Execute {YELLOW}/compact{RESET} in Claude Code or run {YELLOW}claude-context-cleaner{RESET} to avoid 429 lockouts.\n")
-    elif total_tokens >= WARN_THRESHOLD_TOKENS:
+    elif status_key == "warning":
         print(f" {YELLOW}⚠️  ADVISORY:{RESET} Session tokens accumulating. Consider pruning large files.\n")
     else:
         print(f" {GREEN}✓ All systems healthy.{RESET} Operating within optimal token budget.\n")
 
-def run_watch_loop(watch_path=None, interval=3.0):
+def get_metrics_payload(input_tokens, output_tokens, turns, source_label, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+    total_tokens = input_tokens + output_tokens
+    est_cost = round((input_tokens / 1_000_000 * PROMPT_COST_PER_M) + (output_tokens / 1_000_000 * COMPLETION_COST_PER_M), 4)
+    status_key, _, _ = get_status_info(total_tokens, warn_threshold, danger_threshold)
+    return {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "turns": turns,
+        "estimated_cost_usd": est_cost,
+        "context_window_max": 200000,
+        "context_load_pct": round((total_tokens / 200000) * 100, 2),
+        "status": status_key,
+        "source": source_label,
+        "danger_threshold": danger_threshold,
+        "warn_threshold": warn_threshold
+    }
+
+def run_watch_loop(watch_path=None, interval=3.0, demo=False, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
     print(f"[*] Starting live sentinel watch mode (refreshing every {interval}s)...")
     
-    last_in, last_out, last_turns = 0, 0, 0
+    resolved_path = None
+    if watch_path:
+        p = Path(watch_path)
+        if not p.exists():
+            print(f"{RED}[!] Error: Specified transcript not found: {watch_path}{RESET}")
+            sys.exit(1)
+        resolved_path = p
+    elif not demo:
+        resolved_path = find_latest_transcript()
+        if not resolved_path:
+            print(f"{YELLOW}[!] No active Claude Code transcript detected in standard paths.{RESET}")
+            print(f"    Run with {CYAN}--watch /path/to/session.jsonl{RESET} or try {MAGENTA}--demo{RESET} for HUD preview.")
+            sys.exit(1)
+
+    demo_step = 0
     try:
         while True:
-            # If explicit path given
-            if watch_path and Path(watch_path).exists():
-                inp, out, turns = parse_transcript_tokens(watch_path)
+            if demo:
+                demo_step += 1
+                inp = 24000 + (demo_step * 8500)
+                out = 3200 + (demo_step * 1200)
+                turns = demo_step * 3
+                label = f"DEMO SIMULATION (Tick #{demo_step})"
             else:
-                # Mock or live probe
-                inp = last_in + 120
-                out = last_out + 35
-                turns = last_turns + 1
-                
-            format_hud_box(inp, out, turns)
+                inp, out, turns = parse_transcript_tokens(resolved_path)
+                label = resolved_path.name
+
+            print("\033[2J\033[H", end="") # Clear terminal screen
+            print_hud_banner()
+            format_hud_box(inp, out, turns, source_label=label, warn_threshold=warn_threshold, danger_threshold=danger_threshold)
             print(f"{DIM}Press Ctrl+C to stop Claude Token Sentinel.{RESET}")
-            last_in, last_out, last_turns = inp, out, turns
             time.sleep(interval)
     except KeyboardInterrupt:
         print(f"\n{CYAN}[✓] Claude Token Sentinel stopped.{RESET}")
@@ -157,15 +202,56 @@ def main():
     parser.add_argument("--watch", "-w", help="Path to Claude transcript or log file to monitor in real time")
     parser.add_argument("--interval", "-i", type=float, default=3.0, help="Refresh interval in seconds (default: 3.0)")
     parser.add_argument("--tokens", type=int, default=None, help="Instant diagnostic calculation for a given token count")
-    
+    parser.add_argument("--once", action="store_true", help="Inspect session once and exit without loop (useful for CI/hooks)")
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON metrics")
+    parser.add_argument("--demo", action="store_true", help="Simulate token consumption progression for HUD testing")
+    parser.add_argument("--warn-threshold", type=int, default=DEFAULT_WARN_THRESHOLD, help=f"Custom token warning threshold (default: {DEFAULT_WARN_THRESHOLD})")
+    parser.add_argument("--danger-threshold", type=int, default=DEFAULT_DANGER_THRESHOLD, help=f"Custom token danger threshold (default: {DEFAULT_DANGER_THRESHOLD})")
+
     args = parser.parse_args()
-    
+
+    # Diagnostic token calculator
     if args.tokens is not None:
-        print_hud_banner()
-        print(render_meter(args.tokens))
+        if args.json:
+            payload = get_metrics_payload(args.tokens, 0, 1, "CLI --tokens", args.warn_threshold, args.danger_threshold)
+            print(json.dumps(payload, indent=2))
+        else:
+            print_hud_banner()
+            print(render_meter(args.tokens, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold))
         sys.exit(0)
+
+    # Single snapshot evaluation mode
+    if args.once:
+        resolved_path = Path(args.watch) if args.watch else find_latest_transcript()
+        if not resolved_path or not resolved_path.exists():
+            if args.demo:
+                inp, out, turns = 65000, 7200, 12
+                label = "DEMO SNAPSHOT"
+            else:
+                if args.json:
+                    print(json.dumps({"error": "No active Claude Code transcript found"}))
+                else:
+                    print(f"{RED}[!] Error: No active Claude Code transcript found.{RESET}")
+                sys.exit(1)
+        else:
+            inp, out, turns = parse_transcript_tokens(resolved_path)
+            label = resolved_path.name
+
+        if args.json:
+            payload = get_metrics_payload(inp, out, turns, label, args.warn_threshold, args.danger_threshold)
+            print(json.dumps(payload, indent=2))
+        else:
+            print_hud_banner()
+            format_hud_box(inp, out, turns, source_label=label, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold)
         
-    run_watch_loop(args.watch, args.interval)
+        total = inp + out
+        if total >= args.danger_threshold:
+            sys.exit(2)
+        elif total >= args.warn_threshold:
+            sys.exit(1)
+        sys.exit(0)
+
+    run_watch_loop(args.watch, args.interval, demo=args.demo, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold)
 
 if __name__ == "__main__":
     main()
