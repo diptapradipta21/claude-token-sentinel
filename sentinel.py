@@ -64,23 +64,45 @@ def parse_transcript_tokens(file_path):
     output_tokens = 0
     turns = 0
     
+    p = Path(file_path) if file_path else None
+    if not p or not p.exists() or not p.is_file():
+        return 0, 0, 0
+
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    usage = data.get("usage") or data.get("message", {}).get("usage")
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        return 0, 0, 0
+
+    # Line-by-line JSONL streaming parse
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            usage = data.get("usage") or data.get("message", {}).get("usage")
+            if usage:
+                input_tokens += usage.get("input_tokens", 0)
+                output_tokens += usage.get("output_tokens", 0)
+                turns += 1
+        except Exception:
+            continue
+
+    # Fallback for formatted single-document JSON array or object
+    if turns == 0 and content.strip():
+        try:
+            raw = json.loads(content)
+            items = raw if isinstance(raw, list) else [raw]
+            for item in items:
+                if isinstance(item, dict):
+                    usage = item.get("usage") or item.get("message", {}).get("usage")
                     if usage:
                         input_tokens += usage.get("input_tokens", 0)
                         output_tokens += usage.get("output_tokens", 0)
                         turns += 1
-                except Exception:
-                    continue
-    except Exception:
-        pass
+        except Exception:
+            pass
         
     return input_tokens, output_tokens, turns
 
