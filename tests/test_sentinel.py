@@ -85,5 +85,28 @@ class TestClaudeTokenSentinel(unittest.TestCase):
         self.assertEqual(payload["status"], "warning")
         self.assertGreater(payload["estimated_cost_usd"], 0)
 
+
+
+    def test_calculate_cost_models(self):
+        from sentinel import calculate_cost, MODEL_PRICING
+        # 1M prompt + 1M completion on Sonnet = $3 + $15 = $18
+        self.assertAlmostEqual(calculate_cost(1_000_000, 1_000_000, model="sonnet"), 18.00)
+        # Haiku: $0.80 + $4.00 = $4.80
+        self.assertAlmostEqual(calculate_cost(1_000_000, 1_000_000, model="haiku"), 4.80)
+        # Opus: $15.00 + $75.00 = $90.00
+        self.assertAlmostEqual(calculate_cost(1_000_000, 1_000_000, model="opus"), 90.00)
+
+    def test_get_metrics_payload_with_model(self):
+        payload_haiku = get_metrics_payload(
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            turns=5,
+            source_label="test-haiku",
+            model="haiku"
+        )
+        self.assertEqual(payload_haiku["model"], "haiku")
+        self.assertAlmostEqual(payload_haiku["estimated_cost_usd"], 4.80)
+
+
 if __name__ == "__main__":
     unittest.main()

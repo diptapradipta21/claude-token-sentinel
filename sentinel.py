@@ -23,8 +23,20 @@ MAGENTA = "\033[35m"
 DIM = "\033[2m"
 
 # Default Claude Pricing (per 1M tokens) - Sonnet 3.5 / 5.5
-PROMPT_COST_PER_M = 3.00   # $3 / 1M prompt tokens
-COMPLETION_COST_PER_M = 15.00 # $15 / 1M output tokens
+# Claude Pricing Tiers (per 1M tokens: prompt, completion)
+MODEL_PRICING = {
+    "sonnet": (3.00, 15.00),  # Claude 3.5/3.7 Sonnet
+    "opus": (15.00, 75.00),    # Claude 3 Opus
+    "haiku": (0.80, 4.00),     # Claude 3.5 Haiku
+}
+DEFAULT_MODEL = "sonnet"
+PROMPT_COST_PER_M = MODEL_PRICING[DEFAULT_MODEL][0]
+COMPLETION_COST_PER_M = MODEL_PRICING[DEFAULT_MODEL][1]
+
+
+def calculate_cost(input_tokens: int, output_tokens: int, model: str = DEFAULT_MODEL) -> float:
+    prompt_rate, completion_rate = MODEL_PRICING.get(model.lower(), MODEL_PRICING[DEFAULT_MODEL])
+    return (input_tokens / 1_000_000 * prompt_rate) + (output_tokens / 1_000_000 * completion_rate)
 
 # Safe thresholds for Claude Code 200k window
 DEFAULT_WARN_THRESHOLD = 80000    # 80k tokens -> Yellow alert
@@ -132,9 +144,9 @@ def render_meter(current_tokens, max_tokens=200000, bar_length=32, warn_threshol
     _, color, status_label = get_status_info(current_tokens, warn_threshold, danger_threshold)
     return f"[{color}{bar}{RESET}] {ratio*100:5.1f}%  |  Status: {status_label}"
 
-def format_hud_box(input_tokens, output_tokens, turns, source_label="Live", warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+def format_hud_box(input_tokens, output_tokens, turns, source_label="Live", warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD, model=DEFAULT_MODEL):
     total_tokens = input_tokens + output_tokens
-    est_cost = (input_tokens / 1_000_000 * PROMPT_COST_PER_M) + (output_tokens / 1_000_000 * COMPLETION_COST_PER_M)
+    est_cost = calculate_cost(input_tokens, output_tokens, model=model)
     status_key, _, _ = get_status_info(total_tokens, warn_threshold, danger_threshold)
     
     meter_line = render_meter(total_tokens, warn_threshold=warn_threshold, danger_threshold=danger_threshold)
@@ -163,15 +175,16 @@ def format_hud_box(input_tokens, output_tokens, turns, source_label="Live", warn
     else:
         print(f" {GREEN}✓ All systems healthy.{RESET} Operating within optimal token budget.\n")
 
-def get_metrics_payload(input_tokens, output_tokens, turns, source_label, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+def get_metrics_payload(input_tokens, output_tokens, turns, source_label, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD, model=DEFAULT_MODEL):
     total_tokens = input_tokens + output_tokens
-    est_cost = round((input_tokens / 1_000_000 * PROMPT_COST_PER_M) + (output_tokens / 1_000_000 * COMPLETION_COST_PER_M), 4)
+    est_cost = round(calculate_cost(input_tokens, output_tokens, model=model), 4)
     status_key, _, _ = get_status_info(total_tokens, warn_threshold, danger_threshold)
     return {
         "prompt_tokens": input_tokens,
         "completion_tokens": output_tokens,
         "total_tokens": total_tokens,
         "turns": turns,
+        "model": model,
         "estimated_cost_usd": est_cost,
         "context_window_max": 200000,
         "context_load_pct": round((total_tokens / 200000) * 100, 2),
@@ -181,7 +194,7 @@ def get_metrics_payload(input_tokens, output_tokens, turns, source_label, warn_t
         "warn_threshold": warn_threshold
     }
 
-def run_watch_loop(watch_path=None, interval=3.0, demo=False, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD):
+def run_watch_loop(watch_path=None, interval=3.0, demo=False, warn_threshold=DEFAULT_WARN_THRESHOLD, danger_threshold=DEFAULT_DANGER_THRESHOLD, model=DEFAULT_MODEL):
     print(f"[*] Starting live sentinel watch mode (refreshing every {interval}s)...")
     
     resolved_path = None
@@ -213,7 +226,7 @@ def run_watch_loop(watch_path=None, interval=3.0, demo=False, warn_threshold=DEF
 
             print("\033[2J\033[H", end="") # Clear terminal screen
             print_hud_banner()
-            format_hud_box(inp, out, turns, source_label=label, warn_threshold=warn_threshold, danger_threshold=danger_threshold)
+            format_hud_box(inp, out, turns, source_label=label, warn_threshold=warn_threshold, danger_threshold=danger_threshold, model=model)
             print(f"{DIM}Press Ctrl+C to stop Claude Token Sentinel.{RESET}")
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -229,13 +242,14 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Simulate token consumption progression for HUD testing")
     parser.add_argument("--warn-threshold", type=int, default=DEFAULT_WARN_THRESHOLD, help=f"Custom token warning threshold (default: {DEFAULT_WARN_THRESHOLD})")
     parser.add_argument("--danger-threshold", type=int, default=DEFAULT_DANGER_THRESHOLD, help=f"Custom token danger threshold (default: {DEFAULT_DANGER_THRESHOLD})")
+    parser.add_argument("--model", "-m", choices=list(MODEL_PRICING.keys()), default=DEFAULT_MODEL, help="Claude model tier for cost calculation (sonnet, opus, haiku; default: sonnet)")
 
     args = parser.parse_args()
 
     # Diagnostic token calculator
     if args.tokens is not None:
         if args.json:
-            payload = get_metrics_payload(args.tokens, 0, 1, "CLI --tokens", args.warn_threshold, args.danger_threshold)
+            payload = get_metrics_payload(args.tokens, 0, 1, "CLI --tokens", args.warn_threshold, args.danger_threshold, model=args.model)
             print(json.dumps(payload, indent=2))
         else:
             print_hud_banner()
@@ -260,11 +274,11 @@ def main():
             label = resolved_path.name
 
         if args.json:
-            payload = get_metrics_payload(inp, out, turns, label, args.warn_threshold, args.danger_threshold)
+            payload = get_metrics_payload(inp, out, turns, label, args.warn_threshold, args.danger_threshold, model=args.model)
             print(json.dumps(payload, indent=2))
         else:
             print_hud_banner()
-            format_hud_box(inp, out, turns, source_label=label, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold)
+            format_hud_box(inp, out, turns, source_label=label, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold, model=args.model)
         
         total = inp + out
         if total >= args.danger_threshold:
@@ -273,7 +287,7 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
-    run_watch_loop(args.watch, args.interval, demo=args.demo, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold)
+    run_watch_loop(args.watch, args.interval, demo=args.demo, warn_threshold=args.warn_threshold, danger_threshold=args.danger_threshold, model=args.model)
 
 if __name__ == "__main__":
     main()
